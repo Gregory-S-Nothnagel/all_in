@@ -30,48 +30,50 @@
   </div>
 
   <script>
-  (() => {
-    const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyjutrUVyD_NrjNA_3QqChj85bNOV5NyWZ2QCKA4biICWhHLLAIYim4E0pVj3icBvS5fA/exec';
-    let state = { row: null, logsum: 0, played:0, skipped:0 };
+  (function(){
+    const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzkX6MbUUwMLJLqV81LwMnFhTlzoF5FrVSVB1sBzOW-DUp35zjYvpoahyVNUmd6uWUoVA/exec';  // ← replace
 
-    document.getElementById('btnLogin').onclick = async () => {
-      const user = document.getElementById('user').value;
-      const pass = document.getElementById('pass').value;
-      const res  = await fetch(SCRIPT_URL, {
-        method:'POST',
-        body: JSON.stringify({ action:'login', user, pass }),
-        headers:{ 'Content-Type':'application/json' }
-      }).then(r=>r.json());
+    let state = { row:null, logsum:0, played:0, skipped:0 };
+    let words = [], trial = 0, trueWord;
+    const MAX_TRIALS = 10, CTX = 50, CAND = 5;
 
-      if (!res.success) {
-        return document.getElementById('err').innerText = 'Login failed';
-      }
-      // stash state and launch game
-      Object.assign(state, res);
-      document.getElementById('login').style.display = 'none';
-      document.getElementById('game').style.display = 'block';
-      startTrial();
+    // ——— LOGIN via JSONP ———
+    document.getElementById('btnLogin').onclick = () => {
+      const u = encodeURIComponent(document.getElementById('user').value);
+      const p = encodeURIComponent(document.getElementById('pass').value);
+      const cbName = 'loginCb_' + Date.now();
+
+      // define callback globally
+      window[cbName] = function(res) {
+        delete window[cbName];
+        document.body.removeChild(script);
+        if (!res.success) {
+          return document.getElementById('err').innerText = 'Login failed';
+        }
+        Object.assign(state, res);
+        document.getElementById('login').style.display = 'none';
+        document.getElementById('game').style.display  = 'block';
+        startTrial();
+      };
+
+      const script = document.createElement('script');
+      script.src = `${SCRIPT_URL}?action=login&user=${u}&pass=${p}&callback=${cbName}`;
+      document.body.appendChild(script);
     };
 
-    // load corpus
-    let words = [];
+    // ——— Load corpus ———
     fetch('text.txt')
       .then(r=>r.text())
-      .then(txt => {
+      .then(txt=>{
         words = txt
           .split(/\s+/)
-          .map(w => w.replace(/[\W_]+/g,'').toLowerCase())
+          .map(w=>w.replace(/[\W_]+/g,'').toLowerCase())
           .filter(w=>w);
       });
 
-    // GAME PARAMETERS
-    const MAX_TRIALS = 10, CTX = 50, CAND = 5;
-    let trial=0, trueWord;
-
+    // ——— Game logic ———
     function startTrial(){
       if (trial >= MAX_TRIALS) return endGame();
-
-      // pick context + true
       const idx = Math.floor(Math.random()*(words.length-CTX-1));
       const ctxWords = words.slice(idx, idx+CTX);
       trueWord = words[idx+CTX];
@@ -82,22 +84,20 @@
     function buildSliders(){
       const container = document.getElementById('sliders');
       container.innerHTML = '';
-      // pick candidates
-      const others = Array.from(new Set(words))
-                        .filter(w=>w!==trueWord);
-      const cands = shuffle(others).slice(0,CAND-1)
-                        .concat(trueWord);
-      shuffle(cands);
+      const candidates = shuffle(
+        Array.from(new Set(words))
+          .filter(w=>w!==trueWord)
+      ).slice(0, CAND-1)
+       .concat(trueWord);
+      shuffle(candidates);
 
-      cands.forEach(w => {
+      candidates.forEach(w=>{
         const row = document.createElement('div');
         row.className = 'slider-row';
         const lbl = document.createElement('label');
         lbl.textContent = w;
         const inp = document.createElement('input');
-        inp.type = 'range';
-        inp.min = 0; inp.max = 100;
-        inp.value = 100/CAND;
+        inp.type = 'range'; inp.min=0; inp.max=100; inp.value=100/CAND;
         inp.oninput = normalize;
         row.append(lbl, inp);
         container.append(row);
@@ -105,67 +105,79 @@
     }
 
     function normalize(){
-      const inputs = [...document.querySelectorAll('#sliders input')];
-      const sum = inputs.reduce((s,i)=>s+ +i.value, 0);
+      const inputs = Array.from(document.querySelectorAll('#sliders input'));
+      const sum = inputs.reduce((s,i)=>s + +i.value, 0);
       if (sum === 0) {
         inputs.forEach(i=> i.value = 100/CAND);
-        return;
+      } else {
+        inputs.forEach(i=> i.value = i.value / sum * 100);
       }
-      inputs.forEach(i=> i.value = i.value/sum*100);
     }
 
     document.getElementById('btnSubmit').onclick = () => {
-      const inputs = [...document.querySelectorAll('#sliders input')];
-      const labels = [...document.querySelectorAll('#sliders label')];
-      const probs = {};
+      const inputs = Array.from(document.querySelectorAll('#sliders input'));
+      const labels = Array.from(document.querySelectorAll('#sliders label'));
+      const probs  = {};
       inputs.forEach((i,j)=> probs[labels[j].textContent] = i.value/100);
-
       const p = probs[trueWord] || 0;
+
       if (p > 0) {
         state.logsum += Math.log(p);
         state.played++;
+        trial++;
+        updateSheet('played');
       } else {
         state.skipped++;
-        return updateSheet('skipped');
+        updateSheet('skipped');
       }
-      trial++;
-      updateSheet('played', Math.exp(state.logsum/state.played));
     };
 
-    async function updateSheet(result, newLogMean=0) {
-      // send update
-      await fetch(SCRIPT_URL, {
-        method:'POST',
-        body: JSON.stringify({
-          action: result==='played' ? 'update' : 'update',
-          row:    state.row,
-          result,
-          incrementRounds: state.played,
-          newLogSum:       state.logsum,
-          incrementSkipped: state.skipped
-        }),
-        headers:{ 'Content-Type':'application/json' }
+    // ——— UPDATE via JSONP ———
+    function updateSheet(result) {
+      const cbName = 'updateCb_' + Date.now();
+      window[cbName] = function(res){
+        delete window[cbName];
+        document.body.removeChild(script);
+        if (result === 'skipped' || trial >= MAX_TRIALS) {
+          endGame();
+        } else {
+          startTrial();
+        }
+      };
+
+      const params = new URLSearchParams({
+        action: result === 'played' ? 'update' : 'update',
+        row:    state.row,
+        result: result,
+        played: state.played,
+        logsum: state.logsum,
+        skipped: state.skipped,
+        callback: cbName
       });
-      if (trial >= MAX_TRIALS || result==='skipped') return endGame();
-      startTrial();
+
+      const script = document.createElement('script');
+      script.src = SCRIPT_URL + '?' + params;
+      document.body.appendChild(script);
     }
 
     function endGame(){
-      alert(`Game over!  
-Average prob score: ${ (state.logsum> -Infinity) ? Math.exp(state.logsum/state.played).toFixed(4) : '0.0000' }`);
+      const avg = state.played > 0
+        ? Math.exp(state.logsum / state.played).toFixed(4)
+        : '0.0000';
+      alert(`Game over!\nAverage score: ${avg}`);
       document.getElementById('btnSubmit').disabled = true;
     }
 
-    // simple Fisher–Yates
     function shuffle(a){
-      for(let i=a.length-1;i>0;i--){
-        const j=Math.floor(Math.random()*(i+1));
-        [a[i],a[j]]=[a[j],a[i]];
+      for(let i=a.length-1; i>0; i--){
+        const j = Math.floor(Math.random()*(i+1));
+        [a[i], a[j]] = [a[j], a[i]];
       }
       return a;
     }
 
   })();
   </script>
+
 </body>
 </html>
